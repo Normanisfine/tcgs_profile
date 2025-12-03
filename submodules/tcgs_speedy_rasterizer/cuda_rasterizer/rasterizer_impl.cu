@@ -30,6 +30,7 @@ namespace cg = cooperative_groups;
 #include "forward.h"
 #include "backward.h"
 #include "tcgs.h"
+#include <nvtx3/nvToolsExt.h>
 
 // Helper function to find the next-highest bit of the MSB
 // on the CPU.
@@ -246,6 +247,7 @@ int CudaRasterizer::Rasterizer::forward(
 	}
 
 	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
+	nvtxRangePush("Preprocessing");
 	CHECK_CUDA(FORWARD::preprocess(
 		P, D, M,
 		means3D,
@@ -272,9 +274,11 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.tiles_touched,
 		prefiltered
 	), debug)
+	nvtxRangePop();
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
+	nvtxRangePush("TileBinning");
 	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
@@ -297,10 +301,12 @@ int CudaRasterizer::Rasterizer::forward(
     geomState.tiles_touched,
 		tile_grid)
 	CHECK_CUDA(, debug)
+	nvtxRangePop();
 
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
+	nvtxRangePush("Sorting");
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
 		binningState.list_sorting_space,
 		binningState.sorting_size,
@@ -317,10 +323,12 @@ int CudaRasterizer::Rasterizer::forward(
 			binningState.point_list_keys,
 			imgState.ranges);
 	CHECK_CUDA(, debug)
+	nvtxRangePop();
 
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
 
+	nvtxRangePush("AlphaBlending");
 #if USE_TCGS
 	CHECK_CUDA(TCGS::renderCUDA_Forward(
 		tile_grid, block,
@@ -352,6 +360,8 @@ int CudaRasterizer::Rasterizer::forward(
 		out_color,
 		out_invdepth), debug)
 #endif
+	nvtxRangePop();
+
   // End Overall timer
   cudaEventRecord(overallStop, 0);
   cudaEventSynchronize(overallStop);
